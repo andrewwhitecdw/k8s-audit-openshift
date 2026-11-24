@@ -7,7 +7,7 @@ small and dependency-light, so contributions are easy to review and easy to trus
 
 Every check must be:
 
-- **`kubectl` + `jq` only.** No extra binaries, no cloud SDKs, no network calls.
+- **`kubectl`/`oc` + `jq` only.** No extra binaries, no cloud SDKs, no network calls.
 - **Read-only.** A check must never mutate the cluster. We only ever `get`/`list`.
 - **High-signal.** It should catch a real, common misconfiguration — not a stylistic nit.
   If a well-run cluster trips it constantly with no security consequence, it's noise.
@@ -26,8 +26,8 @@ check_pods FAIL "Pod Security" "#7b Dangerous capabilities added" \
   'any(.spec.containers[]?; (.securityContext.capabilities.add // []) | any(. == "SYS_ADMIN" or . == "NET_ADMIN"))'
 ```
 
-Use `any(.spec.containers[]?; <cond>)` rather than `.spec.containers[]? | <cond>` so a
-pod with several matching containers is counted once, not N times.
+Always use pod-level existential filters (`any(.spec.containers[]?; <cond>)`) instead of
+`.spec.containers[]? | <cond>` so a pod with several matching containers is counted once, not N times.
 
 For checks that aren't per-pod (RBAC bindings, namespaces, cluster-wide objects), add a
 small block that ends in a `record PASS|WARN|FAIL "<domain>" "<#N name>" "<detail>"` call —

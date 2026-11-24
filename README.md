@@ -3,7 +3,7 @@
 **A fast, dependency-light Kubernetes security audit you can run in one command.**
 
 `k8s-audit` runs a set of high-signal security checks against your current cluster
-using only `kubectl` + `jq`, and prints a clean report grouped by security domain —
+using `oc` or `kubectl` + `jq` (in that order), and prints a clean report grouped by security domain —
 privileged containers, missing NetworkPolicies, over-broad RBAC, `:latest` images,
 missing resource limits, and more.
 
@@ -33,7 +33,11 @@ cd k8s-audit
 ./k8s-audit.sh
 ```
 
-Requirements: `kubectl` (pointed at your cluster) and `jq`.
+Requirements: `jq` plus one cluster client (`oc` preferred when authenticated, otherwise `kubectl`) pointed at your cluster.
+You can force the client with `K8S_CLI=<binary>`.
+
+If cluster access is unavailable (bad context/auth/network), `k8s-audit` exits non-zero instead of reporting a false clean pass.
+On OpenShift (`oc` selected and authenticated), check #8 treats `openshift` and `openshift-*` as platform namespaces and skips them.
 
 ## Usage
 

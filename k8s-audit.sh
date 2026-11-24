@@ -3,7 +3,7 @@
 # k8s-audit — a fast, dependency-light Kubernetes security audit.
 #
 # Runs a set of high-signal security checks against your current cluster using
-# only kubectl + jq, grouped by the 9 domains of the k8s-security.pro 50-point
+# only kubectl/oc + jq, grouped by the 9 domains of the k8s-security.pro 50-point
 # checklist. If kube-bench / Trivy / kubescape are installed, it points you to
 # them for deeper CIS/NSA coverage.
 #
@@ -26,6 +26,9 @@ JSON=false
 HTML_OUT=""           # empty = no HTML report
 PASS=0; WARN=0; FAIL=0
 declare -a FINDINGS    # "SEVERITY|DOMAIN|CHECK|DETAIL"
+K8S_CLI="${K8S_CLI:-}"
+KCTL_BIN=""
+IS_OPENSHIFT=false
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -39,13 +42,48 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-command -v kubectl >/dev/null || { echo "kubectl not found" >&2; exit 1; }
 command -v jq >/dev/null || { echo "jq not found (brew install jq)" >&2; exit 1; }
+
+if [[ -n "$K8S_CLI" ]]; then
+  command -v "$K8S_CLI" >/dev/null || { echo "$K8S_CLI not found" >&2; exit 1; }
+  KCTL_BIN="$K8S_CLI"
+elif command -v oc >/dev/null 2>&1 && oc whoami >/dev/null 2>&1; then
+  KCTL_BIN="oc"
+elif command -v kubectl >/dev/null 2>&1; then
+  KCTL_BIN="kubectl"
+elif command -v oc >/dev/null 2>&1; then
+  KCTL_BIN="oc"
+else
+  echo "kubectl or oc not found" >&2
+  exit 1
+fi
+
+kctl() { "$KCTL_BIN" "$@"; }
+fail_access() {
+  echo "cluster access check failed: $1" >&2
+  exit 2
+}
+
+if [[ "$KCTL_BIN" == "oc" ]]; then
+  if kctl whoami >/dev/null 2>&1; then
+    IS_OPENSHIFT=true
+  elif command -v kubectl >/dev/null 2>&1; then
+    KCTL_BIN="kubectl"
+  fi
+fi
 
 if [[ -n "$NS_FILTER" ]]; then NS_ARGS=(-n "$NS_FILTER"); else NS_ARGS=(--all-namespaces); fi
 
-# pull all pods once
-PODS_JSON="$(kubectl get pods "${NS_ARGS[@]}" -o json 2>/dev/null || echo '{"items":[]}')"
+if [[ -n "$NS_FILTER" ]]; then
+  kctl get ns "$NS_FILTER" >/dev/null 2>&1 || fail_access "namespace '$NS_FILTER' not found or not readable"
+fi
+
+# pull all pods once (hard-fail if cluster is unreachable or unauthorized)
+if PODS_JSON="$(kctl get pods "${NS_ARGS[@]}" -o json 2>/dev/null)"; then
+  :
+else
+  fail_access "cannot list pods for scope (${NS_ARGS[*]}) via $KCTL_BIN"
+fi
 
 # note: `((X++))` returns exit 1 when X is 0, which aborts under `set -e`; use assignment form
 record() { FINDINGS+=("$1|$2|$3|$4"); case "$1" in PASS) PASS=$((PASS+1));; WARN) WARN=$((WARN+1));; FAIL) FAIL=$((FAIL+1));; esac; }
@@ -53,10 +91,18 @@ record() { FINDINGS+=("$1|$2|$3|$4"); case "$1" in PASS) PASS=$((PASS+1));; WARN
 # helper: count pods matching a jq filter over .items[]
 count_pods() { echo "$PODS_JSON" | jq "[.items[] | select($1)] | length"; }
 list_pods()  { echo "$PODS_JSON" | jq -r "[.items[] | select($1) | .metadata.namespace + \"/\" + .metadata.name] | .[0:8] | .[]"; }
+normalize_count() {
+  local raw="$1"
+  raw="${raw//$'\r'/}"
+  raw="${raw%%$'\n'*}"
+  [[ "$raw" =~ ^[0-9]+$ ]] || raw=0
+  printf '%s' "$raw"
+}
 
 check_pods() { # severity domain "#N check" jq_filter
   local sev="$1" dom="$2" name="$3" filt="$4"
   local c; c="$(count_pods "$filt")"
+  c="$(normalize_count "$c")"
   if [[ "$c" == "0" ]]; then record PASS "$dom" "$name" "no matching workloads"
   else
     local more=""; [[ "$c" -gt 8 ]] && more=", +$((c-8)) more"
@@ -66,9 +112,9 @@ check_pods() { # severity domain "#N check" jq_filter
 
 # ── Pod Security (checklist domain I) ─────────────────────────────────────────
 check_pods FAIL "Pod Security" "#2 Privileged containers" \
-  '.spec.containers[]?.securityContext?.privileged == true'
+  'any(.spec.containers[]?; (.securityContext.privileged // false) == true)'
 check_pods FAIL "Pod Security" "#3 allowPrivilegeEscalation not disabled" \
-  '(.spec.containers[]? | (.securityContext.allowPrivilegeEscalation // true)) == true'
+  'any(.spec.containers[]?; (.securityContext.allowPrivilegeEscalation // true) == true)'
 check_pods WARN "Pod Security" "#4 Running as root (runAsNonRoot unset)" \
   '((.spec.securityContext.runAsNonRoot // false) == false) and (all(.spec.containers[]?; (.securityContext.runAsNonRoot // false) == false))'
 check_pods FAIL "Pod Security" "#5 hostNetwork / hostPID / hostIPC" \
@@ -76,7 +122,7 @@ check_pods FAIL "Pod Security" "#5 hostNetwork / hostPID / hostIPC" \
 check_pods WARN "Pod Security" "#6 SA token auto-mounted" \
   '(.spec.automountServiceAccountToken // true) == true'
 check_pods WARN "Pod Security" "#7 Capabilities not dropped (ALL)" \
-  '.spec.containers[]? | ((.securityContext.capabilities.drop // []) | index("ALL")) == null'
+  'any(.spec.containers[]?; ((.securityContext.capabilities.drop // []) | index("ALL")) == null)'
 check_pods FAIL "Pod Security" "#7b Dangerous capabilities added" \
   'any(.spec.containers[]?; (.securityContext.capabilities.add // []) | any(. == "SYS_ADMIN" or . == "NET_ADMIN" or . == "NET_RAW" or . == "SYS_PTRACE" or . == "SYS_MODULE" or . == "ALL"))'
 check_pods WARN "Pod Security" "#4b readOnlyRootFilesystem not set" \
@@ -85,41 +131,68 @@ check_pods WARN "Pod Security" "#9 hostPath volumes mounted" \
   'any(.spec.volumes[]?; .hostPath != null)'
 # ── Supply Chain (domain V) ───────────────────────────────────────────────────
 check_pods WARN "Supply Chain" "#28 Images using :latest or untagged" \
-  '.spec.containers[]?.image | (test(":latest$")) or (test(":") | not)'
+  'any(.spec.containers[]?; (.image // "") | (test(":latest$")) or (test(":") | not))'
 
 # ── Resource Management (domain IV) ──────────────────────────────────────────
 check_pods WARN "Cluster Hardening" "#22 Containers without resource limits" \
-  '.spec.containers[]? | (.resources.limits == null)'
+  'any(.spec.containers[]?; (.resources.limits == null))'
 
 # ── Cluster hygiene ──────────────────────────────────────────────────────────
-DEFAULT_WORKLOADS="$(kubectl get pods -n default --no-headers 2>/dev/null | wc -l | tr -d ' ')"
-if [[ "$DEFAULT_WORKLOADS" == "0" ]]; then record PASS "Cluster Hardening" "#20 Workloads in default namespace" "default namespace is empty"
-else record WARN "Cluster Hardening" "#20 Workloads in default namespace" "$DEFAULT_WORKLOADS pod(s) in 'default'"; fi
+if DEFAULT_PODS_RAW="$(kctl get pods -n default --no-headers 2>/dev/null)"; then
+  DEFAULT_WORKLOADS="$(printf '%s' "$DEFAULT_PODS_RAW" | wc -l | tr -d ' ')"
+  DEFAULT_WORKLOADS="$(normalize_count "$DEFAULT_WORKLOADS")"
+  if [[ "$DEFAULT_WORKLOADS" == "0" ]]; then record PASS "Cluster Hardening" "#20 Workloads in default namespace" "default namespace is empty"
+  else record WARN "Cluster Hardening" "#20 Workloads in default namespace" "$DEFAULT_WORKLOADS pod(s) in 'default'"; fi
+else
+  record WARN "Cluster Hardening" "#20 Workloads in default namespace" "unable to assess: cannot list pods in 'default'"
+fi
 
 # ── Network (domain II): namespaces with no NetworkPolicy ────────────────────
-NP_MISSING=""
-while read -r ns; do
-  [[ -z "$ns" || "$ns" =~ ^(kube-system|kube-public|kube-node-lease)$ ]] && continue
-  local_np="$(kubectl get netpol -n "$ns" --no-headers 2>/dev/null | wc -l | tr -d ' ')"
-  [[ "$local_np" == "0" ]] && NP_MISSING+="$ns "
-done < <(kubectl get ns -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null)
-if [[ -z "$NP_MISSING" ]]; then record PASS "Network" "#8 Namespaces without a NetworkPolicy" "all namespaces have at least one"
-else record FAIL "Network" "#8 Namespaces without a NetworkPolicy" "no NetworkPolicy in: ${NP_MISSING% }"; fi
+if [[ -n "$NS_FILTER" ]]; then
+  local_np="$(kctl get netpol -n "$NS_FILTER" --no-headers 2>/dev/null | wc -l | tr -d ' ' || true)"
+  local_np="$(normalize_count "$local_np")"
+  if [[ "$local_np" == "0" ]]; then
+    record FAIL "Network" "#8 Namespaces without a NetworkPolicy" "no NetworkPolicy in: $NS_FILTER"
+  else
+    record PASS "Network" "#8 Namespaces without a NetworkPolicy" "$NS_FILTER has at least one"
+  fi
+else
+  if NS_LIST_JSON="$(kctl get ns -o json 2>/dev/null)"; then
+    NP_MISSING=""
+    while read -r ns; do
+      [[ -z "$ns" || "$ns" =~ ^(kube-system|kube-public|kube-node-lease|openshift|openshift-.*)$ ]] && continue
+      local_np="$(kctl get netpol -n "$ns" --no-headers 2>/dev/null | wc -l | tr -d ' ' || true)"
+      local_np="$(normalize_count "$local_np")"
+      [[ "$local_np" == "0" ]] && NP_MISSING+="$ns "
+    done < <(printf '%s' "$NS_LIST_JSON" | jq -r '.items[]?.metadata.name')
+    if [[ -z "$NP_MISSING" ]]; then record PASS "Network" "#8 Namespaces without a NetworkPolicy" "all namespaces have at least one"
+    else record FAIL "Network" "#8 Namespaces without a NetworkPolicy" "no NetworkPolicy in: ${NP_MISSING% }"; fi
+  else
+    record WARN "Network" "#8 Namespaces without a NetworkPolicy" "unable to assess: cannot list namespaces"
+  fi
+fi
 
 # ── RBAC (domain III): cluster-admin bindings ────────────────────────────────
-ADMIN_BINDINGS="$(kubectl get clusterrolebindings -o json 2>/dev/null \
-  | jq -r '[.items[] | select(.roleRef.name=="cluster-admin") | .metadata.name] | length' 2>/dev/null || echo 0)"
-if [[ "$ADMIN_BINDINGS" -le 1 ]]; then record PASS "RBAC" "#14 cluster-admin bindings" "$ADMIN_BINDINGS binding(s)"
-else record WARN "RBAC" "#14 cluster-admin bindings" "$ADMIN_BINDINGS bindings grant cluster-admin — review each"; fi
+if CRB_JSON="$(kctl get clusterrolebindings -o json 2>/dev/null)"; then
+  ADMIN_BINDINGS="$(printf '%s' "$CRB_JSON" | jq -r '[.items[]? | select(.roleRef.name=="cluster-admin") | .metadata.name] | length')"
+  ADMIN_BINDINGS="$(normalize_count "$ADMIN_BINDINGS")"
+  if [[ "$ADMIN_BINDINGS" -le 1 ]]; then record PASS "RBAC" "#14 cluster-admin bindings" "$ADMIN_BINDINGS binding(s)"
+  else record WARN "RBAC" "#14 cluster-admin bindings" "$ADMIN_BINDINGS bindings grant cluster-admin — review each"; fi
+else
+  record WARN "RBAC" "#14 cluster-admin bindings" "unable to assess: cannot list clusterrolebindings"
+fi
 
 # ── RBAC (domain III): roles granting verbs=* on resources=* ─────────────────
-WILDCARD_COUNT="$(kubectl get clusterroles,roles --all-namespaces -o json 2>/dev/null \
-  | jq -r '[.items[] | select((.metadata.name // "" | startswith("system:")) | not) | select(any(.rules[]?; ((.verbs // []) | index("*")) and ((.resources // []) | index("*"))))] | length' 2>/dev/null || echo 0)"
-if [[ "${WILDCARD_COUNT:-0}" -eq 0 ]]; then record PASS "RBAC" "#16 Roles granting * verbs on * resources" "none (excluding built-in system: roles)"
+if ROLES_JSON="$(kctl get clusterroles,roles --all-namespaces -o json 2>/dev/null)"; then
+  WILDCARD_COUNT="$(printf '%s' "$ROLES_JSON" | jq -r '[.items[]? | select((.metadata.name // "" | startswith("system:")) | not) | select(any(.rules[]?; ((.verbs // []) | index("*")) and ((.resources // []) | index("*"))))] | length')"
+  WILDCARD_COUNT="$(normalize_count "$WILDCARD_COUNT")"
+  if [[ "$WILDCARD_COUNT" -eq 0 ]]; then record PASS "RBAC" "#16 Roles granting * verbs on * resources" "none (excluding built-in system: roles)"
+  else
+    WNAMES="$(printf '%s' "$ROLES_JSON" | jq -r '[.items[]? | select((.metadata.name // "" | startswith("system:")) | not) | select(any(.rules[]?; ((.verbs // []) | index("*")) and ((.resources // []) | index("*")))) | .metadata.name] | .[0:8] | join(", ")')"
+    record WARN "RBAC" "#16 Roles granting * verbs on * resources" "$WILDCARD_COUNT role(s): $WNAMES"
+  fi
 else
-  WNAMES="$(kubectl get clusterroles,roles --all-namespaces -o json 2>/dev/null \
-    | jq -r '[.items[] | select((.metadata.name // "" | startswith("system:")) | not) | select(any(.rules[]?; ((.verbs // []) | index("*")) and ((.resources // []) | index("*")))) | .metadata.name] | .[0:8] | join(", ")' 2>/dev/null)"
-  record WARN "RBAC" "#16 Roles granting * verbs on * resources" "$WILDCARD_COUNT role(s): $WNAMES"
+  record WARN "RBAC" "#16 Roles granting * verbs on * resources" "unable to assess: cannot list roles/clusterroles"
 fi
 check_pods WARN "RBAC" "#15 Workloads using the default ServiceAccount" \
   '((.spec.serviceAccountName // "default") == "default") and ((.metadata.namespace // "") | startswith("kube-") | not)'
@@ -129,7 +202,7 @@ html_esc() { sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g' -e 's/"/\&q
 
 write_html() {
   local out="$1"
-  local ctx; ctx="$(kubectl config current-context 2>/dev/null || echo cluster)"
+  local ctx; ctx="$(kctl config current-context 2>/dev/null || echo cluster)"
   local when; when="$(date -u +'%Y-%m-%d %H:%M UTC')"
   local total=$((PASS + WARN + FAIL))
   local scope="all namespaces"; [[ -n "$NS_FILTER" ]] && scope="namespace $NS_FILTER"
@@ -196,8 +269,11 @@ fi
 
 c_red=$'\033[31m'; c_yel=$'\033[33m'; c_grn=$'\033[32m'; c_dim=$'\033[2m'; c_rst=$'\033[0m'
 echo
-echo "  k8s-audit · $(kubectl config current-context 2>/dev/null || echo cluster)"
+echo "  k8s-audit · $(kctl config current-context 2>/dev/null || echo cluster)"
 echo "  ${c_dim}high-signal checks mapped to the k8s-security.pro 50-point checklist${c_rst}"
+if $IS_OPENSHIFT; then
+  echo "  ${c_dim}OpenShift mode detected (using oc; skipping openshift-* namespaces in #8)${c_rst}"
+fi
 echo
 last_dom=""
 for f in "${FINDINGS[@]}"; do
