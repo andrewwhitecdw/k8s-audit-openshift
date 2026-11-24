@@ -116,7 +116,7 @@ then writes a prioritized fix plan with YAML, mapped to CIS, SOC 2 and ISO 27001
 
 ## Contributing
 
-Issues and PRs welcome — especially new high-signal checks (keep them `kubectl`+`jq`
+Issues and PRs welcome — especially new high-signal checks (keep them `kubectl/oc`+`jq`
 only, read-only, and mapped to a checklist domain). New to the project? Look for the
 [`good first issue`](https://github.com/k8s-security-pro/k8s-audit/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22)
 label — each one is a small, self-contained check with the jq filter sketched out for you.
