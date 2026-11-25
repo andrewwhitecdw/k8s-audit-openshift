@@ -37,10 +37,11 @@ see the `cluster-admin` and NetworkPolicy blocks for the pattern.
 
 1. Fork and branch.
 2. Add your check and run `bash -n k8s-audit.sh` (syntax) plus a run against a kind/minikube
-   cluster if you can.
+   cluster if you can. For OpenShift checks, include an `oc`-based run and note required RBAC scope.
 3. If it's a new check, bump the "N of 50" count in `k8s-audit.sh` and `README.md`, and add a
    row to the README table.
-4. Open a PR describing the misconfiguration it catches and why it's high-signal.
+4. If your check adds a new finding ID, include remediation text and effort mapping (`remediation_for`/`effort_for`).
+5. Open a PR describing the misconfiguration it catches and why it's high-signal.
 
 ## Good first issues
 

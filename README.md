@@ -47,7 +47,29 @@ On OpenShift (`oc` selected and authenticated), check #8 treats `openshift` and 
 ./k8s-audit.sh --json          # machine-readable output (for CI / dashboards)
 ./k8s-audit.sh --html          # also write k8s-audit-report.html (shareable, single file)
 ./k8s-audit.sh --html audit-2026-09.html   # pick the file name
+./k8s-audit.sh --csv           # write k8s-audit-report.csv
+./k8s-audit.sh --sarif         # write k8s-audit-report.sarif (code scanning)
+./k8s-audit.sh --baseline-out baseline.json
+./k8s-audit.sh --baseline-in baseline.json --drift-only --json
+./k8s-audit.sh --include-ns '^prod-' --exclude-ns 'prod-sandbox'
+./k8s-audit.sh --fail-on 2,3,5,7b,8
+./k8s-audit.sh --check-pack core,openshift
+./k8s-audit.sh --github-annotations
+./k8s-audit.sh --evidence-dir audit-evidence
 ```
+
+Additional options
+
+- `--profile strict|balanced|legacy` choose policy profile metadata in output.
+- `--check-pack core,openshift` enables optional OpenShift checks (SCC grants, Route TLS posture, NetworkPolicy quality, legacy SA token mounts, escalation-chain detection).
+- `--include-ns` / `--exclude-ns` filter namespace-scoped checks by regex.
+- `--fail-on` controls CI gate by check IDs instead of all FAIL findings.
+  - Default is `AUTO` (`2,3,5,7b,8,OS_ESC_CHAIN`); use `ALL` to fail on any FAIL severity.
+- `--csv`, `--sarif` produce shareable/exportable machine formats.
+- `--baseline-in` + `--drift-only` show only new findings versus baseline.
+- `--baseline-out` writes a reusable baseline snapshot.
+- `--github-annotations` emits GitHub Actions annotations for findings.
+- `--evidence-dir` writes raw evidence payloads used by checks.
 
 Exit code is non-zero if any **FAIL**-severity check trips — so you can gate CI on it.
 
