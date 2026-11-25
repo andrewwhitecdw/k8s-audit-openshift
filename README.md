@@ -71,7 +71,9 @@ Additional options
 - `--github-annotations` emits GitHub Actions annotations for findings.
 - `--evidence-dir` writes raw evidence payloads used by checks.
 
-Exit code is non-zero if any **FAIL**-severity check trips — so you can gate CI on it.
+Exit code is non-zero when a check in the fail gate trips. Default gate is `AUTO`
+(`2,3,5,7b,8,OS_ESC_CHAIN`); use `--fail-on ALL` to fail on any FAIL-severity check, or
+`--fail-on 2,3,7b` to choose your own — so you can gate CI on what matters to you.
 
 ### Shareable HTML report
 
@@ -82,8 +84,7 @@ with `--json`, so one run can feed both a dashboard and a human.
 
 ## Use it in CI
 
-Drop this into `.github/workflows/k8s-security-audit.yml` to fail a PR that introduces
-a privileged container or an unprotected namespace (full example in
+Drop this into `.github/workflows/k8s-security-audit.yml` to gate a PR (full example in
 [`.github/workflows/`](.github/workflows/k8s-security-audit.yml)):
 
 ```yaml
@@ -91,8 +92,41 @@ a privileged container or an unprotected namespace (full example in
   run: |
     curl -sSL https://raw.githubusercontent.com/k8s-security-pro/k8s-audit/main/k8s-audit.sh -o k8s-audit.sh
     chmod +x k8s-audit.sh
-    ./k8s-audit.sh
+    ./k8s-audit.sh --check-pack core,openshift --json --csv --sarif --github-annotations
+  continue-on-error: false
 ```
+
+- Upload `k8s-audit-report.json/.csv/.sarif` as workflow artifacts for dashboards and code scanning.
+- Point `--fail-on` at the check IDs you own as a team; tighten it as the cluster hardens.
+- Use `--baseline-in` + `--drift-only` against a committed baseline to rotate the gate from
+  "no new findings" to "no new findings of these kinds" without a full green pass requirement.
+
+## Recommended OpenShift usage
+
+For a tenant namespace on OpenShift, enable the OpenShift pack with the gating policy and
+machine-readable outputs in one run:
+
+```bash
+./k8s-audit.sh -n payments \
+  --check-pack core,openshift \
+  --profile strict \
+  --fail-on AUTO \
+  --json --csv --sarif \
+  --github-annotations
+```
+
+Baseline + drift workflow (fail only on new regressions vs a known-good snapshot):
+
+```bash
+# 1. capture a known-good baseline
+./k8s-audit.sh -n payments --check-pack core,openshift --baseline-out baseline-payments.json
+
+# 2. later runs: surface only findings not present in the baseline
+./k8s-audit.sh -n payments --check-pack core,openshift \
+  --baseline-in baseline-payments.json --drift-only --json
+```
+
+Tighten the gate once the cluster is stable, for example `--fail-on 2,3,5,7b,8,OS_ESC_CHAIN,14,16`.
 
 ## What it checks (16 of 50)
 
@@ -114,6 +148,16 @@ a privileged container or an unprotected namespace (full example in
 | 20 | Cluster Hardening | Workloads in the `default` namespace |
 | 22 | Cluster Hardening | Containers without resource limits |
 | 28 | Supply Chain | Images using `:latest` or untagged |
+
+OpenShift pack (adds 5 checks with `--check-pack core,openshift` on an `oc` cluster)
+
+| # | Domain | Check |
+|---|--------|-------|
+| OS-SCC | OpenShift Security | Privileged/`anyuid` SCC grant patterns |
+| OS-Route | OpenShift Security | Routes without TLS or with insecure `Allow` policy |
+| OS-NetPol | OpenShift Security | Namespaces lacking a default-deny-style NetworkPolicy |
+| OS-SAToken | OpenShift Security | Workloads mounting token-like secrets (legacy SA tokens) |
+| OS-EscChain | OpenShift Security | Privileged + hostPath + default ServiceAccount chains |
 
 ## Use it with Claude
 
